@@ -4,6 +4,7 @@ from typing import List, Dict, Optional, Tuple, Set, Any, TypeAlias, NotRequired
 import hashlib
 import json
 import os
+from BotClass import BotPlayer
 
 CELL_SIZE: int = 80
 BOARD_SIZE: int = 8
