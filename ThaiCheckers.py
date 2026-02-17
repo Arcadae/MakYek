@@ -1,6 +1,6 @@
 import tkinter as tk
 from tkinter import messagebox
-from typing import List, Dict, Optional, Tuple, Set, Any, TypeAlias, NotRequired, TypedDict, Literal
+from typing import List, Dict, Optional, Tuple, Set, Any, TypeAlias, TypedDict, Literal
 import hashlib
 import json
 import os
@@ -30,6 +30,11 @@ class MakYek:
         self.root.title("Тайские шашки")
         self.root.protocol("WM_DELETE_WINDOW", self._on_closing)
         
+        self.game_mode = "vs_bot"
+        self.player_color = "WHITE"  # Игрок всегда белые
+        self.bot = BotPlayer(game_instance=self)
+        self.bot_thinking = False
+
         bg_color = "#E0E0E0"
         self.root.configure(bg=bg_color)
         
@@ -103,6 +108,23 @@ class MakYek:
         
         self._bind_events()
 
+    def get_board_state(self) -> List[List[Optional[PieceData]]]:
+
+        simplified_board = []
+        for row in range(BOARD_SIZE):
+            board_row = []
+            for col in range(BOARD_SIZE):
+                if self.board[row][col]:
+                    piece = self.board[row][col]
+                    board_row.append({
+                        "color": piece["color"],
+                        "is_king": piece["is_king"]
+                    })
+                else:
+                    board_row.append(None)
+            simplified_board.append(board_row)
+        return simplified_board
+
     def _create_labels(self) -> None:
         if hasattr(self, 'labels_frame'):
             self.labels_frame.destroy()
@@ -160,8 +182,14 @@ class MakYek:
         }
 
     def _bind_events(self) -> None:
-        self.canvas.bind("<ButtonPress-1>", self._on_piece_click)
-        self.canvas.bind("<ButtonRelease-1>", self._on_drop)
+        # Привязываем события только если не думает бот и это ход игрока (белые)
+        if not self.bot_thinking and self.current_turn == "WHITE":
+            self.canvas.bind("<ButtonPress-1>", self._on_piece_click)
+            self.canvas.bind("<ButtonRelease-1>", self._on_drop)
+        else:
+            # Отвязываем события во время хода бота или когда не ход игрока
+            self.canvas.unbind("<ButtonPress-1>")
+            self.canvas.unbind("<ButtonRelease-1>")
 
     def _on_piece_click(self, event: tk.Event) -> None:
         self._clear_highlights()
@@ -383,6 +411,86 @@ class MakYek:
                 self.selected_piece = None
                 self.start_pos = None
 
+    def _schedule_bot_move(self) -> None:
+        self.bot_thinking = True
+
+        self.canvas.unbind("<ButtonPress-1>")
+        self.canvas.unbind("<ButtonRelease-1>")
+        
+        self.root.after(800, self._make_bot_move)  
+    
+    def _make_bot_move(self) -> None:
+        try:
+            timeout_id = self.root.after(5_000, self._bot_timeout)
+            move = self.bot.get_move()
+            self.root.after_cancel(timeout_id)
+
+            if move:
+                start_pos, end_pos = move
+                self._execute_bot_move(start_pos, end_pos)
+            else:
+                self._check_winner()
+        finally:
+            self.bot_thinking = False
+            self._bind_events()
+
+    def _bot_timeout(self):
+        self.bot_thinking = False
+        self._bind_events()
+        messagebox.showwarning("Внимание", "Бот завис, ход переходит к вам")
+
+    def _execute_bot_move(self, start_pos: Position, end_pos: Position) -> None:
+        old_row, old_col = start_pos
+        new_row, new_col = end_pos
+        
+        # Проверяем было ли взятие
+        is_capture = abs(new_row - old_row) >= 2 or abs(new_col - old_col) >= 2
+        
+        # Удаляем срубленную фигуру если нужно
+        if is_capture:
+            dr = 1 if new_row > old_row else -1
+            dc = 1 if new_col > old_col else -1
+            curr_row, curr_col = old_row + dr, old_col + dc
+            
+            while curr_row != new_row or curr_col != new_col:
+                if self.board[curr_row][curr_col]:
+                    self._remove_piece(curr_row, curr_col)
+                    break
+                curr_row += dr
+                curr_col += dc
+        
+        # Перемещаем фигуру
+        piece = self.board[old_row][old_col]
+        self.board[new_row][new_col] = piece
+        self.board[old_row][old_col] = None
+        
+        # Обновляем позицию на canvas
+        x, y = new_col * CELL_SIZE, new_row * CELL_SIZE
+        self.canvas.coords(
+            piece["piece"],
+            x + 10, y + 10,
+            x + CELL_SIZE - 10, y + CELL_SIZE - 10
+        )
+        
+        if piece["crown"]:
+            self.canvas.coords(
+                piece["crown"],
+                x + 25, y + 25,
+                x + CELL_SIZE - 25, y + CELL_SIZE - 25
+            )
+        
+        # Проверяем превращение в дамку
+        if not piece["is_king"]:
+            if (new_row == 0 and piece["color"] == WHITE_PIECE_COLOR) or \
+               (new_row == BOARD_SIZE - 1 and piece["color"] == RED_PIECE_COLOR):
+                self._make_king(new_row, new_col)
+        
+        # Логируем ход
+        self._add_move_to_log(start_pos, end_pos, is_capture)
+        
+        # Меняем ход
+        self._change_turn()
+
     def _remove_piece(self, row: int, col: int) -> None:
         piece = self.board[row][col]
         if piece:
@@ -536,6 +644,9 @@ class MakYek:
         # Проверяем пат после смены хода
         self._check_winner()
 
+        if self.current_turn == "RED":
+            self._schedule_bot_move()
+
     def _update_piece_position(self, row: int, col: int) -> None:
         x, y = col * CELL_SIZE, row * CELL_SIZE
         self.canvas.coords(
@@ -574,6 +685,7 @@ class MakYek:
             self._create_labels()
             self._init_board()
             self._place_pieces()
+            self._bind_events()
 
     def _on_closing(self) -> None:
         if messagebox.askyesno("Выход", "Вы уверены, что хотите выйти?"):
